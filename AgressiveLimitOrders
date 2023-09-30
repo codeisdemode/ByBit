@@ -1,0 +1,151 @@
+import time
+import hmac
+import hashlib
+import json
+import requests
+from random import randrange
+
+# Initialize Bybit-specific configurations
+apiKey = 'xxxx'
+apiSecret = 'xxxx'
+URL = "https://api.bybit.com"
+
+# Ask the user for inputs
+symbol = input("Enter the trading pair (e.g., BTCUSDT): ")
+total_usdt_value = float(input("Enter the total amount in USDT you'd like to trade: "))
+best_bid_or_ask_price = get_best_bid_or_ask()
+if best_bid_or_ask_price is None:
+    print("Couldn't fetch the best bid/ask price.")
+    exit()
+
+# Convert the USDT value to base currency quantity using the fetched price.
+total_qty_to_trade = total_usdt_value / best_bid_or_ask_price
+
+qty_per_order = float(input("Enter the quantity per order in the base currency (e.g., BTC for BTCUSDT): "))
+target_duration_seconds = int(input("Enter the target duration in seconds: "))
+adjustment_interval_seconds = int(input("Enter the adjustment interval in seconds: "))
+
+orderStatus = {}  # To keep track of order's status and timestamps
+MAX_RETRIES = 3
+API_RATE_LIMIT = 5  # Assumed requests per second for Bybit
+last_api_call_time = 0
+
+def get_best_bid_or_ask():
+    try:
+        url = URL + f"/v2/public/orderBook/L2?symbol={symbol}&limit=1"
+        response = session.get(url)
+        data = response.json()
+
+        # Here we're just returning the best ask, but you can modify to return the best bid or both
+        if 'result' in data and len(data['result']) > 0:
+            return float(data['result'][0]['price'])
+        else:
+            return None
+    except Exception as e:
+        print(f"Error fetching best bid/ask: {e}")
+        return None
+
+def place_aggressive_limit_order(qty, price):
+    currentTime = int(time.time() * 1000)
+    orderLinkId = str(currentTime) + 'CDN' + str(randrange(1000, 9999))
+    
+    payload = json.dumps({
+        "category": "linear",
+        "symbol": symbol,
+        "side": "Buy",
+        "positionIdx": 0,
+        "orderType": "Limit",
+        "qty": str(qty),
+        "price": str(price),
+        "timeInForce": "IOC",
+        "orderLinkId": orderLinkId,
+        "reduce_only": "false",
+        "closeOnTrigger": "false"
+    })
+    
+    placeV5USDTOrder(payload, currentTime, orderLinkId)
+    return orderLinkId
+
+def placeV5USDTOrder(payload, timeStamp, orderLinkId):
+    url = URL + "/v5/order/create"
+    dataObj = json.loads(payload)
+    recv_window = str(5000)
+    param_str = str(timeStamp) + apiKey + recv_window + payload
+    hash = hmac.new(bytes(apiSecret, "utf-8"), param_str.encode("utf-8"), hashlib.sha256)
+    signature = hash.hexdigest()
+    
+    headers = {
+        'X-BAPI-API-KEY': apiKey,
+        'X-BAPI-SIGN': signature,
+        'X-BAPI-SIGN-TYPE': '2',
+        'X-BAPI-TIMESTAMP': str(timeStamp),
+        'X-BAPI-RECV-WINDOW': recv_window,
+        'cdn-request-id': orderLinkId,
+        'Content-Type': 'application/json'
+    }
+    
+    orderStatus[orderLinkId] = {}
+    orderStatus[orderLinkId]['orderPlaceTime'] = timeStamp
+    response = session.request("POST", url, headers=headers, data=payload)
+    orderStatus[orderLinkId]['elapsed'] = int(response.elapsed.microseconds / 1000)
+
+def fetch_order_status_from_server(order_id):
+    """ Fetches the order status for the given order ID from Bybit's server """
+    url = URL + f"/v2/private/order?symbol={symbol}&order_id={order_id}"
+    timeStamp = int(time.time() * 1000)
+    param_str = f"api_key={apiKey}&symbol={symbol}&order_id={order_id}&timestamp={timeStamp}"
+    hash = hmac.new(bytes(apiSecret, "utf-8"), param_str.encode("utf-8"), hashlib.sha256)
+    signature = hash.hexdigest()
+
+    headers = {
+        'X-BAPI-API-KEY': apiKey,
+        'X-BAPI-SIGN': signature,
+        'X-BAPI-SIGN-TYPE': '2',
+        'X-BAPI-TIMESTAMP': str(timeStamp),
+        'Content-Type': 'application/json'
+    }
+    
+    response = session.get(url, headers=headers)
+    data = response.json()
+
+    if 'result' in data:
+        return data['result']['order_status']
+    else:
+        print(f"Error fetching order status from server: {data}")
+        return None
+
+def order_not_filled(order_id):
+    """ Checks if an order is not filled using the server status """
+    order_status = fetch_order_status_from_server(order_id)
+    return order_status != 'Filled'
+
+def wait_for_api_limit():
+    global last_api_call_time
+    elapsed_time = time.time() - last_api_call_time
+    if elapsed_time < (1.0 / API_RATE_LIMIT):
+        time.sleep((1.0 / API_RATE_LIMIT) - elapsed_time)
+    last_api_call_time = time.time()
+
+def main():
+    qty_traded = 0
+
+    while qty_traded < total_qty_to_trade:
+        best_ask = get_best_bid_or_ask()
+
+        if best_ask is not None:
+            order_id = place_aggressive_limit_order(qty_per_order, best_ask)
+            
+            retries = 0
+            while order_not_filled(order_id) and retries < MAX_RETRIES:
+                retries += 1
+                time.sleep(adjustment_interval_seconds)
+                best_ask = get_best_bid_or_ask()
+                if best_ask is not None:
+                    place_aggressive_limit_order(qty_per_order, best_ask)
+
+            qty_traded += qty_per_order
+
+        wait_for_api_limit()
+
+if __name__ == "__main__":
+    main()
