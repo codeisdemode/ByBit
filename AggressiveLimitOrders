@@ -9,6 +9,22 @@ from random import randrange
 apiKey = 'xxxx'
 apiSecret = 'xxxx'
 URL = "https://api.bybit.com"
+session = requests.Session()  # Initialize the session
+
+def get_best_bid_or_ask():
+    try:
+        url = URL + f"/v2/public/orderBook/L2?symbol={symbol}&limit=1"
+        response = session.get(url)
+        data = response.json()
+
+        # Here we're just returning the best ask, but you can modify to return the best bid or both
+        if 'result' in data and len(data['result']) > 0:
+            return float(data['result'][0]['price'])
+        else:
+            return None
+    except Exception as e:
+        print(f"Error fetching best bid/ask: {e}")
+        return None
 
 # Ask the user for inputs
 symbol = input("Enter the trading pair (e.g., BTCUSDT): ")
@@ -29,21 +45,6 @@ orderStatus = {}  # To keep track of order's status and timestamps
 MAX_RETRIES = 3
 API_RATE_LIMIT = 5  # Assumed requests per second for Bybit
 last_api_call_time = 0
-
-def get_best_bid_or_ask():
-    try:
-        url = URL + f"/v2/public/orderBook/L2?symbol={symbol}&limit=1"
-        response = session.get(url)
-        data = response.json()
-
-        # Here we're just returning the best ask, but you can modify to return the best bid or both
-        if 'result' in data and len(data['result']) > 0:
-            return float(data['result'][0]['price'])
-        else:
-            return None
-    except Exception as e:
-        print(f"Error fetching best bid/ask: {e}")
-        return None
 
 def place_aggressive_limit_order(qty, price):
     currentTime = int(time.time() * 1000)
